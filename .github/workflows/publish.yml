@@ -1,0 +1,21 @@
+name: Publish crate
+
+on:
+  release:
+    types: [released]
+
+env:
+  # By default github action doesn't have color
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test
+      - run: cargo publish --token ${TOKEN}
+        env:
+          TOKEN: ${{ secrets.PUBLISH_TOKEN }}
