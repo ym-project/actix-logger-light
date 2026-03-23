@@ -11,6 +11,14 @@
     "[rust]": {
 		"editor.defaultFormatter": "rust-lang.rust-analyzer"
 	},
+	"[yaml]": {
+		"editor.defaultFormatter": "esbenp.prettier-vscode",
+		"editor.insertSpaces": true,
+		"editor.tabSize": 2,
+		"editor.indentSize": 2,
+		"editor.autoIndent": "advanced",
+		"diffEditor.ignoreTrimWhitespace": false
+	},
     "rust-analyzer.check.command": "clippy",
 	"conventionalCommits.emojiFormat": "emoji"
 }
