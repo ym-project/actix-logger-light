@@ -1,6 +1,6 @@
 [package]
 name = "actix-logger-light"
-version = "0.0.0"
+version = "0.1.0"
 rust-version = "1.94"
 edition = "2024"
 license = "MIT"
