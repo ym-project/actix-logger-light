@@ -25,13 +25,13 @@ use time::OffsetDateTime;
 ///   output example: `127.0.0.1 "GET /test HTTP/1.1" 404 20 "-" "HTTPie/2.2.0" 0.001074`
 ///
 /// # Examples
+/// ```no_run
+/// use actix_logger_light::Logger;
+/// use actix_web::App;
+///
+/// // Init logger using env_logger or similar crate before starting the server
+/// let app = App::new().wrap(Logger::default());
 /// ```
-/// use actix_web::{middleware::Logger, App};
-///
-/// // Init logger using env_logger or similar crate
-/// env_logger::init_from_env(env_logger::Env::new().default_filter_or("info"));
-///
-/// let app = App::new().wrap(Logger::default())
 #[derive(Debug, Default)]
 pub struct Logger;
 
