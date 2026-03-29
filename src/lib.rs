@@ -124,34 +124,32 @@ where
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-		let start_time = *this.start_time;
-		let remote_addr = mem::take(this.remote_addr);
-		let request_line = mem::take(this.request_line);
-		let referer = mem::take(this.referer);
-		let user_agent = mem::take(this.user_agent);
 
 		let res = match ready!(this.fut.poll(cx)) {
 			Ok(res) => res,
 			Err(err) => {
 				let status = err.as_response_error().status_code().as_u16();
-
 				emit_log(
 					Level::Error,
-					start_time,
-					&remote_addr,
-					&request_line,
+					*this.start_time,
+					this.remote_addr,
+					this.request_line,
 					status,
 					0,
-					&referer,
-					&user_agent,
+					this.referer,
+					this.user_agent,
 				);
-
 				return Poll::Ready(Err(err));
 			},
 		};
 
 		let level = if res.response().error().is_some() { Level::Error } else { Level::Info };
 		let status = res.status().as_u16();
+		let start_time = *this.start_time;
+		let remote_addr = mem::take(this.remote_addr);
+		let request_line = mem::take(this.request_line);
+		let referer = mem::take(this.referer);
+		let user_agent = mem::take(this.user_agent);
 
 		Poll::Ready(Ok(res.map_body(move |_, body| StreamLog {
 			body,
@@ -245,7 +243,29 @@ mod tests {
 		test::TestRequest,
 	};
 	use log::{Level, LevelFilter, Log, Metadata, Record};
-	use std::{cell::RefCell, sync::OnceLock};
+	use std::{
+		cell::RefCell,
+		future::Future,
+		pin::Pin,
+		sync::OnceLock,
+		task::{Context, Poll},
+	};
+
+	struct YieldOnce(bool);
+
+	impl Future for YieldOnce {
+		type Output = ();
+
+		fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+			if self.0 {
+				Poll::Ready(())
+			} else {
+				self.0 = true;
+				cx.waker().wake_by_ref();
+				Poll::Pending
+			}
+		}
+	}
 
 	// Why thread_local is used?
 	// Because variable RECORDS is static and shares state for all test cases. We need to have own
@@ -390,6 +410,28 @@ mod tests {
 		let req = TestRequest::default().to_srv_request();
 		let (_, msg) = call_and_get_log(srv, req).await;
 		assert!(msg.contains("200 5"), "expected '200 5' in: {msg}");
+	}
+
+	// Regression test: mem::take was called before ready!(), which emptied the fields on the first
+	// Pending poll. On the next poll the fields were already empty strings.
+	#[actix_web::test]
+	async fn when_future_is_pending_before_resolving_fields_are_not_empty() {
+		setup();
+		let inner = fn_service(|req: ServiceRequest| async {
+			YieldOnce(false).await; // Poll::Pending on first poll
+			Ok::<_, Error>(req.into_response(HttpResponse::new(StatusCode::OK)))
+		});
+		let srv = Logger.new_transform(inner).await.unwrap();
+		let req = TestRequest::get()
+			.uri("/api/users")
+			.insert_header((header::USER_AGENT, "MyBot/2.0"))
+			.to_srv_request();
+		let res = srv.call(req).await.unwrap();
+		to_bytes(res.into_body()).await.unwrap();
+
+		let (_, msg) = last_record().expect("no log record captured");
+		assert!(msg.contains("GET /api/users HTTP/1.1"), "request_line was empty: {msg}");
+		assert!(msg.contains("\"MyBot/2.0\""), "user_agent was empty: {msg}");
 	}
 
 	#[actix_web::test]
