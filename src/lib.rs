@@ -4,6 +4,7 @@ use actix_web::{
 	dev::{Service, ServiceRequest, ServiceResponse, Transform, forward_ready},
 	web::Bytes,
 };
+use log::Level;
 use pin_project_lite::pin_project;
 use std::{
 	future::{Future, Ready, ready},
@@ -123,24 +124,39 @@ where
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
 		let this = self.project();
-
-		let res = match ready!(this.fut.poll(cx)) {
-			Ok(res) => res,
-			Err(err) => return Poll::Ready(Err(err)),
-		};
-
-		let is_error = res.response().error().is_some();
-		let status = res.status().as_u16();
 		let start_time = *this.start_time;
 		let remote_addr = mem::take(this.remote_addr);
 		let request_line = mem::take(this.request_line);
 		let referer = mem::take(this.referer);
 		let user_agent = mem::take(this.user_agent);
 
+		let res = match ready!(this.fut.poll(cx)) {
+			Ok(res) => res,
+			Err(err) => {
+				let status = err.as_response_error().status_code().as_u16();
+
+				emit_log(
+					Level::Error,
+					start_time,
+					&remote_addr,
+					&request_line,
+					status,
+					0,
+					&referer,
+					&user_agent,
+				);
+
+				return Poll::Ready(Err(err));
+			},
+		};
+
+		let level = if res.response().error().is_some() { Level::Error } else { Level::Info };
+		let status = res.status().as_u16();
+
 		Poll::Ready(Ok(res.map_body(move |_, body| StreamLog {
 			body,
 			size: 0,
-			is_error,
+			level,
 			status,
 			start_time,
 			remote_addr,
@@ -156,7 +172,7 @@ pin_project! {
 		#[pin]
 		body: B,
 		size: usize,
-		is_error: bool,
+		level: Level,
 		status: u16,
 		start_time: OffsetDateTime,
 		remote_addr: String,
@@ -167,22 +183,7 @@ pin_project! {
 
 	impl<B> PinnedDrop for StreamLog<B> {
 		fn drop(this: Pin<&mut Self>) {
-			let elapsed = OffsetDateTime::now_utc() - this.start_time;
-			let elapsed_secs = elapsed.as_seconds_f64();
-			let level = if this.is_error { log::Level::Error } else { log::Level::Info };
-
-			// Default target is module_path!()
-			log::log!(
-				level,
-				"{} \"{}\" {} {} \"{}\" \"{}\" {:.6}",
-				this.remote_addr,
-				this.request_line,
-				this.status,
-				this.size,
-				this.referer,
-				this.user_agent,
-				elapsed_secs,
-			);
+			emit_log(this.level, this.start_time, &this.remote_addr, &this.request_line, this.status, this.size, &this.referer, &this.user_agent);
 		}
 	}
 }
@@ -212,6 +213,26 @@ impl<B: MessageBody> MessageBody for StreamLog<B> {
 	}
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_log(
+	level: Level,
+	start_time: OffsetDateTime,
+	remote_addr: &str,
+	request_line: &str,
+	status: u16,
+	size: usize,
+	referer: &str,
+	user_agent: &str,
+) {
+	let elapsed = (OffsetDateTime::now_utc() - start_time).as_seconds_f64();
+
+	// Default target is module_path!()
+	log::log!(
+		level, "{} \"{}\" {} {} \"{}\" \"{}\" {:.6}", remote_addr, request_line, status, size,
+		referer, user_agent, elapsed,
+	);
+}
+
 #[cfg(test)]
 mod tests {
 	use super::{Logger, StreamLog};
@@ -219,6 +240,7 @@ mod tests {
 		Error, HttpResponse,
 		body::{BoxBody, to_bytes},
 		dev::{Service, ServiceRequest, ServiceResponse, Transform, fn_service},
+		error,
 		http::{StatusCode, header},
 		test::TestRequest,
 	};
@@ -377,5 +399,31 @@ mod tests {
 		let res = srv.call(req).await.unwrap();
 		let body = to_bytes(res.into_body()).await.unwrap();
 		assert_eq!(body.as_ref(), b"hello world");
+	}
+
+	#[actix_web::test]
+	async fn when_service_returns_error_it_is_logged_at_error_level() {
+		setup();
+		let inner = fn_service(|_req: ServiceRequest| async {
+			Err::<ServiceResponse, _>(error::ErrorInternalServerError("boom"))
+		});
+		let srv = Logger.new_transform(inner).await.unwrap();
+		let req = TestRequest::default().to_srv_request();
+		let _ = srv.call(req).await;
+		let (level, _) = last_record().expect("no log record captured");
+		assert_eq!(level, Level::Error);
+	}
+
+	#[actix_web::test]
+	async fn when_service_returns_error_status_code_is_logged() {
+		setup();
+		let inner = fn_service(|_req: ServiceRequest| async {
+			Err::<ServiceResponse, _>(error::ErrorInternalServerError("boom"))
+		});
+		let srv = Logger.new_transform(inner).await.unwrap();
+		let req = TestRequest::default().to_srv_request();
+		let _ = srv.call(req).await;
+		let (_, msg) = last_record().expect("no log record captured");
+		assert!(msg.contains("500"), "expected '500' in: {msg}");
 	}
 }
